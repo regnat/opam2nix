@@ -295,11 +295,12 @@ let patch env =
 		let contents = Sys.readdir files_path
 			|> Array.map (Filename.concat files_path) in
 		Lwt_main.run (Cmd.(run_unit_exn exec_none) (List.concat [
-			[ "cp"; "-r" ];
+			[ "cp"; "-r"; "--no-preserve=mode"; "--dereference" ];
 			Array.to_list contents;
 			[ "./" ]
-		])
-		)
+                ])
+                );
+                Lwt_main.run (Cmd.(run_unit_exn exec_none) (["chmod"; "-R"; "+w"; "."]))
 	);
 	apply_patches env
 
