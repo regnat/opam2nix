@@ -267,41 +267,9 @@ let newer_versions available pkg =
 	)
 
 let setup_repo ~path ~(commit:string option) : string Lwt.t =
-	let open Util in
+  let _ = commit in
 	FileUtil.mkdir ~parent:true (Filename.dirname path);
-	let clone_repo () =
-		Printf.eprintf "Cloning %s...\n" repo_url; flush stderr;
-		rm_r path;
-		Cmd.run_unit_exn Cmd.exec_none [ "git"; "clone"; repo_url; path ]
-	in
-	let print = false in
-	let git args = ["git"; "-C"; path ] @ args in
-	let origin_head = "origin/HEAD" in
-	let resolve_commit rev = Cmd.run_output_exn ~print (git ["rev-parse"; rev]) |> Lwt.map String.trim in
-	let run_devnull = Cmd.run_unit_exn (Cmd.exec_none ~stdout:`Dev_null ~stderr:`Dev_null) ~print in
-	let fetch () =
-		Printf.eprintf "Fetching...\n";
-		run_devnull (git ["fetch"; "--force"; repo_url; "HEAD:refs/heads/origin/HEAD"]) in
-	let reset_hard commit = run_devnull (git ["reset"; "--hard"; commit]) in
-	(* TODO need to lock? ... *)
-	let update_repo () =
-		(match commit with
-			| Some commit ->
-				(* only fetch if git lacks the given ref *)
-				Cmd.run_unit (Cmd.exec_none) ~join:Cmd.join_success_bool ~print (git ["cat-file"; "-e"; commit]) >>= (fun has_commit ->
-					if not has_commit then fetch () else Lwt.return_unit
-				) |> Lwt.map (fun () -> commit)
-			| None -> fetch () |> Lwt.map (fun () -> origin_head)
-		) >>= fun commit ->
-		reset_hard commit >>= fun () ->
-		resolve_commit commit
-	in
-	(if not (Sys.file_exists path) then (
-		clone_repo ()
-	) else (
-		Lwt.return_unit
-	)) >>= update_repo
-;;
+        Cmd.run_output_exn ~print:true (["nix-build"; "--out-link"; path; "--indirect"; "./nix/opam-repository.nix"])
 
 let setup_external_constraints
 	~repo_commit ~detect_from ~ocaml_version ~opam_repo ~cache : external_constraints Lwt.t =
@@ -348,17 +316,14 @@ let setup_external_constraints
 
 	let repo_commit = setup_repo ~path:opam_repo ~commit:repo_commit in
 	Lwt.both ocaml_version repo_commit |> Lwt.map (fun (ocaml_version, repo_commit) ->
-		let key = "git:" ^ repo_commit in
+          let _ = cache in
 		(* TODO this could return a temp dir which we use to avoid needing a lock on the repo *)
 		Printf.eprintf "Importing opam-repository %s into nix store...\n" repo_commit;
-		let repo_digest = Digest_cache.add_custom cache ~keys:[key] (fun () ->
-			nix_digest_of_git_repo opam_repo |> Lwt.map Result.ok
-		) |> Lwt.map (Result.get_exn Digest_cache.string_of_error) in
 		{
 			repo_commit;
 			ocaml_version;
 			(* returned as Lwt.t because it's needed lazily much later than commit and version *)
-			repo_digest;
+			repo_digest = Lwt.return (`sha256 "");
 		}
 	)
 ;;
@@ -413,8 +378,6 @@ let write_solution ~external_constraints ~(available_packages:loaded_package Opa
 		"selection", `Attrs selection
 	] in
 
-	let sha256 = Lwt_main.run external_constraints.repo_digest
-		|> fun (`sha256 x) -> x in
 	let expr : Nix_expr.t = `Function (
 		`Id "self",
 		`Let_bindings (AttrSet.build [
@@ -423,15 +386,7 @@ let write_solution ~external_constraints ~(available_packages:loaded_package Opa
 			"selection", `Lit "self.selection";
 			"repoPath", `Lit "self.repoPath";
 			"opam-commit", str external_constraints.repo_commit;
-			"repo", `Call [
-				`Property (`Id "pkgs", "fetchFromGitHub");
-				`Attrs (AttrSet.build [
-					"owner", str repo_owner;
-					"repo", str repo_name;
-					"rev", `Id "opam-commit";
-					"sha256", str sha256;
-				])
-			];
+                        "repo", `Call [ `Id "import"; `Id "./nix/opam-repository.nix"; `Attrs (AttrSet.build [ ("pkgs", `Id "pkgs") ]) ];
 		],
 		`Attrs (AttrSet.build attrs);
 	)) in
